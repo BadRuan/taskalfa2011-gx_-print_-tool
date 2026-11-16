@@ -1,0 +1,393 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>局域网打印 · TASKalfa 2011</title>
+<style>
+  :root{--line:#e5e7eb;--muted:#6b7280;--accent:#2563eb;--ok:#0f9d58;--err:#dc2626;--warn:#d97706}
+  *{box-sizing:border-box}
+  body{margin:0;background:#f7f8fa;color:#111827;font:14px/1.6 -apple-system,"PingFang SC","Microsoft YaHei",sans-serif}
+  .wrap{max-width:1080px;margin:0 auto;padding:24px 16px 60px}
+  h1{font-size:22px;margin:0 0 4px}
+  .sub{color:var(--muted);font-size:13px;margin-bottom:18px}
+  .card{background:#fff;border:1px solid var(--line);border-radius:12px;padding:18px;margin-bottom:16px}
+  .card-title{font-weight:600;margin-bottom:12px;display:flex;align-items:center;justify-content:space-between}
+  .card-title .count{font-size:12px;color:var(--muted);font-weight:400}
+  .drop{border:2px dashed #cbd5e1;border-radius:12px;padding:34px 16px;text-align:center;cursor:pointer;transition:.15s;background:#fbfcfe}
+  .drop:hover,.drop.over{border-color:var(--accent);background:#f0f6ff}
+  .drop b{color:var(--accent)}
+  .file{margin-top:10px;font-size:13px;color:#111827}
+  .row{display:flex;gap:18px;flex-wrap:wrap;margin-top:16px}
+  .field{flex:1 1 180px;min-width:160px}
+  .field label{display:block;font-size:12px;color:var(--muted);margin-bottom:6px}
+  .seg{display:flex;border:1px solid var(--line);border-radius:8px;overflow:hidden}
+  .seg button{flex:1;border:0;background:#fff;padding:8px 6px;cursor:pointer;font-size:13px;color:#374151}
+  .seg button+button{border-left:1px solid var(--line)}
+  .seg button.on{background:var(--accent);color:#fff}
+  .dpi-fixed{border:1px solid var(--line);border-radius:8px;padding:8px 10px;font-size:13px;color:var(--muted);background:#f9fafb}
+  input[type=number],input[type=text],select{width:100%;padding:8px 10px;border:1px solid var(--line);border-radius:8px;font-size:13px;background:#fff}
+  .check{display:flex;align-items:center;gap:8px;font-size:13px;color:#374151}
+  .actions{display:flex;gap:10px;margin-top:20px;flex-wrap:wrap}
+  .btn{border:0;border-radius:9px;padding:11px 20px;font-size:14px;cursor:pointer;background:var(--accent);color:#fff}
+  .btn.ghost{background:#fff;color:#374151;border:1px solid var(--line)}
+  .btn:disabled{opacity:.55;cursor:not-allowed}
+  .status{display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:12px}
+  .stat{background:#fbfcfe;border:1px solid var(--line);border-radius:10px;padding:10px 12px}
+  .stat .k{font-size:12px;color:var(--muted)}
+  .stat .v{font-size:15px;font-weight:600;margin-top:2px}
+  .dot{display:inline-block;width:8px;height:8px;border-radius:50%;margin-right:6px;vertical-align:1px}
+  .dot.on{background:var(--ok)}.dot.off{background:var(--err)}.dot.warn{background:var(--warn)}
+  .tablebox{overflow-x:auto}
+  table{width:100%;border-collapse:collapse;font-size:13px;min-width:920px}
+  th,td{padding:9px 10px;border-bottom:1px solid var(--line);text-align:left;white-space:nowrap}
+  th{color:var(--muted);font-weight:500;font-size:12px;background:#fafbfc}
+  tbody tr:hover{background:#f8fafc}
+  td.name{max-width:240px;overflow:hidden;text-overflow:ellipsis}
+  td.msg{max-width:240px;overflow:hidden;text-overflow:ellipsis;color:#4b5563}
+  td.num{color:var(--muted);width:48px}
+  td.time{color:#374151;font-variant-numeric:tabular-nums}
+  .tag{display:inline-block;padding:2px 8px;border-radius:999px;font-size:12px}
+  .tag.pending{background:#eef2ff;color:#4338ca}
+  .tag.printing{background:#fff7ed;color:#c2410c}
+  .tag.done{background:#ecfdf5;color:#047857}
+  .tag.error{background:#fef2f2;color:#b91c1c}
+  .empty{color:var(--muted);font-size:13px;padding:10px 0}
+  .hint{color:var(--muted);font-size:12px;margin-top:8px}
+  .flash{margin-top:12px;font-size:13px}
+  .flash.err{color:var(--err)}.flash.ok{color:var(--ok)}
+  .preview-wrap{display:flex;gap:20px;flex-wrap:wrap;align-items:flex-start}
+  .paper{position:relative;background:#fff;border:1px solid #d1d5db;border-radius:2px;
+         box-shadow:0 3px 14px rgba(15,23,42,.10);flex:0 0 auto;overflow:hidden}
+  .paper img{position:absolute;display:block}
+  .paper .edge{position:absolute;border:1px dashed #cbd5e1;pointer-events:none}
+  .preview-side{flex:1 1 300px;min-width:260px}
+  .thumbs{display:flex;gap:8px;flex-wrap:wrap;margin-bottom:12px}
+  .thumb{position:relative;border:1px solid var(--line);background:#fff;border-radius:6px;
+         padding:3px;cursor:pointer;line-height:0}
+  .thumb.on{border-color:var(--accent);box-shadow:0 0 0 2px rgba(37,99,235,.15)}
+  .thumb img{width:54px;height:auto;display:block}
+  .thumb span{position:absolute;right:3px;bottom:3px;font-size:10px;color:#fff;
+              background:rgba(15,23,42,.62);border-radius:4px;padding:0 4px;line-height:14px}
+  .preview-empty{color:var(--muted);font-size:13px;padding:6px 0}
+</style>
+</head>
+<body>
+<div class="wrap">
+  <h1>局域网打印服务</h1>
+  <div class="sub">京瓷 TASKalfa 2011 · 由 fedora 上的 podman 容器直接发送 KPSL 打印流</div>
+
+  <div class="card">
+    <div id="printerStatus" class="status"></div>
+  </div>
+
+  <div class="card">
+    <div id="drop" class="drop">
+      <div style="font-size:28px;line-height:1">＋</div>
+      <div style="margin-top:8px">把文件拖到这里，或 <b>点击选择</b></div>
+      <div class="hint">支持 PDF / Word / Excel / PPT / 图片 / PS</div>
+      <div id="fileName" class="file"></div>
+    </div>
+    <input id="fileInput" type="file" style="display:none" multiple>
+
+    <div class="row">
+      <div class="field">
+        <label>单双面</label>
+        <div class="seg" id="duplex">
+          <button data-v="off" class="on">单面</button>
+          <button data-v="long">双面·长边</button>
+          <button data-v="short">双面·短边</button>
+        </div>
+      </div>
+      <div class="field">
+        <label>份数</label>
+        <input id="copies" type="number" min="1" max="99" value="1">
+      </div>
+    </div>
+
+    <div class="row">
+      <div class="field">
+        <label>纸张</label>
+        <select id="paper">
+          <option value="A4">A4</option>
+          <option value="A3">A3</option>
+          <option value="A5">A5</option>
+          <option value="Letter">Letter</option>
+          <option value="Legal">Legal</option>
+        </select>
+      </div>
+      <div class="field">
+        <label>分辨率</label>
+        <div class="dpi-fixed">600 dpi（固定，打印机原生分辨率）</div>
+      </div>
+      <div class="field">
+        <label>页码范围（可选）</label>
+        <input id="pages" type="text" placeholder="例如 1-4，留空为全部">
+      </div>
+    </div>
+
+    <div class="row">
+      <div class="field">
+        <label class="check"><input id="fit" type="checkbox" checked> 适应纸张大小（不裁切）</label>
+      </div>
+    </div>
+
+    <div class="actions">
+      <button id="btnPrint" class="btn">开始打印</button>
+      <button id="btnTest" class="btn ghost">打印测试页（双面）</button>
+      <button id="btnRefresh" class="btn ghost">刷新状态</button>
+    </div>
+    <div id="flash" class="flash"></div>
+  </div>
+
+  <div class="card" id="previewCard" style="display:none">
+    <div class="card-title"><span>打印预览</span><span id="previewMeta" class="count"></span></div>
+    <div class="preview-wrap">
+      <div id="paperFrame" class="paper"><img id="previewImg" alt="预览"></div>
+      <div class="preview-side">
+        <div id="thumbs" class="thumbs"></div>
+        <div id="previewHint" class="hint"></div>
+        <div class="preview-title" id="previewSizes"></div>
+      </div>
+    </div>
+  </div>
+
+  <div class="card">
+    <div class="card-title"><span>最近任务</span><span id="jobCount" class="count"></span></div>
+    <div id="jobs"><div class="empty">暂无任务</div></div>
+  </div>
+</div>
+
+<script>
+const $ = (s) => document.querySelector(s);
+let files = [];
+let duplex = 'off';
+let previewToken = null;      // 预览生成后复用它的 PDF，打印时不必重传
+let previewPages = [];
+let previewSeq = 0;           // 丢弃过期预览响应
+let previewBusy = false;
+
+function seg(id, setter) {
+  document.querySelectorAll('#' + id + ' button').forEach((b) => {
+    b.onclick = () => {
+      document.querySelectorAll('#' + id + ' button').forEach((x) => x.classList.remove('on'));
+      b.classList.add('on');
+      setter(b.dataset.v);
+    };
+  });
+}
+seg('duplex', (v) => duplex = v);
+
+const drop = $('#drop');
+function setFiles(list) {
+  files = Array.from(list || []);
+  $('#fileName').textContent = files.map((f) => f.name).join('、');
+  if (files.length) buildPreview(); else hidePreview();
+}
+
+drop.onclick = () => $('#fileInput').click();
+$('#fileInput').onchange = (e) => setFiles(e.target.files);
+['dragover', 'dragenter'].forEach((ev) => drop.addEventListener(ev, (e) => {
+  e.preventDefault(); drop.classList.add('over');
+}));
+['dragleave', 'drop'].forEach((ev) => drop.addEventListener(ev, (e) => {
+  e.preventDefault(); drop.classList.remove('over');
+}));
+drop.addEventListener('drop', (e) => setFiles(e.dataTransfer.files));
+
+function hidePreview() {
+  previewToken = null;
+  previewPages = [];
+  $('#previewCard').style.display = 'none';
+  $('#previewImg').removeAttribute('src');
+  $('#thumbs').innerHTML = '';
+  $('#previewMeta').textContent = '';
+  $('#previewHint').textContent = '';
+  $('#previewSizes').textContent = '';
+}
+
+const mmOf = (pt) => Math.round(pt / 72 * 25.4);
+
+function setPreviewPage(page) {
+  const item = previewPages.find((x) => x.page === page);
+  if (!item) return;
+  $('#previewImg').src = item.url;
+  $('#thumbs').querySelectorAll('.thumb').forEach((el) => {
+    el.classList.toggle('on', Number(el.dataset.p) === page);
+  });
+  $('#previewMeta').textContent = `第 ${page} / ${previewPages.length} 页`;
+}
+
+function renderPreview(j) {
+  $('#previewCard').style.display = '';
+  const [pw, ph] = j.paper_pt;
+  const [cw, ch] = j.content_pt;
+  const [mx, my] = j.margin_pt;
+  const W = 340;
+  const frame = $('#paperFrame');
+  frame.style.width = W + 'px';
+  frame.style.height = Math.round(W * ph / pw) + 'px';
+  const img = $('#previewImg');
+  img.style.left = (mx / pw * 100).toFixed(3) + '%';
+  img.style.top = (my / ph * 100).toFixed(3) + '%';
+  img.style.width = (cw / pw * 100).toFixed(3) + '%';
+  img.style.height = (ch / ph * 100).toFixed(3) + '%';
+  $('#thumbs').innerHTML = previewPages.map((it) =>
+    `<div class="thumb" data-p="${it.page}"><img src="${it.url}" alt="第${it.page}页"><span>${it.page}</span></div>`
+  ).join('');
+  $('#thumbs').querySelectorAll('.thumb').forEach((el) => {
+    el.onclick = () => setPreviewPage(Number(el.dataset.p));
+  });
+  $('#previewHint').textContent = j.truncated
+    ? `共 ${j.pages} 页，这里只预览前 ${j.rendered} 页`
+    : `共 ${j.pages} 页，预览与打印使用同一套几何参数`;
+  $('#previewSizes').textContent = `${j.paper} · 可打印区 ${mmOf(cw)}×${mmOf(ch)} mm · 页边距 ${mmOf(mx)}/${mmOf(my)} mm · ${j.fit ? '缩放适应纸张' : '1:1 裁切'}`;
+  setPreviewPage(1);
+}
+
+async function buildPreview() {
+  if (!files.length) { hidePreview(); return; }
+  const seq = ++previewSeq;
+  const fd = new FormData();
+  files.forEach((f) => fd.append('file', f, f.name));
+  fd.append('paper', $('#paper').value);
+  fd.append('fit', $('#fit').checked ? '1' : '0');
+  previewBusy = true;
+  $('#previewCard').style.display = '';
+  $('#previewMeta').textContent = '生成中…';
+  $('#previewHint').textContent = '正在转换文件并渲染预览';
+  $('#previewSizes').textContent = '';
+  $('#thumbs').innerHTML = '';
+  try {
+    const r = await fetch('/api/preview', { method: 'POST', body: fd });
+    const j = await r.json();
+    if (seq !== previewSeq) return;
+    if (!r.ok) throw new Error(j.error || '预览生成失败');
+    previewToken = j.token;
+    previewPages = j.images || [];
+    renderPreview(j);
+  } catch (e) {
+    if (seq !== previewSeq) return;
+    hidePreview();
+    flash('预览失败：' + e.message, 'err');
+  } finally {
+    if (seq === previewSeq) previewBusy = false;
+  }
+}
+
+function flash(msg, cls) {
+  const el = $('#flash');
+  el.textContent = msg || '';
+  el.className = 'flash ' + (cls || '');
+}
+
+const esc = (s) => String(s == null ? '' : s).replace(/[&<>"]/g, (c) => (
+  { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
+
+async function doPrint() {
+  if (!files.length && !previewToken) { flash('请先选择文件', 'err'); return; }
+  if (previewBusy) { flash('预览还在生成，请稍等…', 'err'); return; }
+  const fd = new FormData();
+  if (previewToken) fd.append('token', previewToken);
+  else files.forEach((f) => fd.append('file', f, f.name));
+  fd.append('copies', $('#copies').value || '1');
+  fd.append('duplex', duplex);
+  fd.append('paper', $('#paper').value);
+  fd.append('dpi', '600');
+  fd.append('fit', $('#fit').checked ? '1' : '0');
+  fd.append('pages', $('#pages').value.trim());
+  const btn = $('#btnPrint');
+  btn.disabled = true;
+  flash(previewToken ? '正在提交打印…' : '正在上传…');
+  try {
+    const r = await fetch('/api/print', { method: 'POST', body: fd });
+    const j = await r.json();
+    if (!r.ok) throw new Error(j.error || '提交失败');
+    flash('已加入打印队列：' + j.job.name, 'ok');
+    files = [];
+    $('#fileName').textContent = '';
+    $('#fileInput').value = '';
+    hidePreview();
+    load();
+  } catch (e) {
+    flash(e.message, 'err');
+  } finally {
+    btn.disabled = false;
+  }
+}
+
+async function testPage() {
+  const btn = $('#btnTest');
+  btn.disabled = true;
+  try {
+    const fd = new FormData();
+    const r = await fetch('/api/test', { method: 'POST', body: fd });
+    const j = await r.json();
+    if (!r.ok) throw new Error(j.error || '提交失败');
+    flash('测试页已加入队列', 'ok');
+    load();
+  } catch (e) {
+    flash(e.message, 'err');
+  } finally {
+    btn.disabled = false;
+  }
+}
+
+function renderPrinter(p) {
+  const dot = p.reachable ? 'on' : 'off';
+  const items = [
+    ['打印机', p.reachable ? '在线' : '离线', dot],
+    ['型号', p.model || '—', ''],
+    ['设备状态', p.state || '—', ''],
+    ['面板显示', (p.panel || '—').trim() || '—', ''],
+    ['累计页数', p.page_count == null ? '—' : p.page_count, ''],
+  ];
+  $('#printerStatus').innerHTML = items.map(([k, v, d]) =>
+    `<div class="stat"><div class="k">${k}</div><div class="v">${d ? `<span class="dot ${d}"></span>` : ''}${esc(v)}</div></div>`
+  ).join('');
+}
+
+function renderJobs(jobs) {
+  $('#jobCount').textContent = jobs && jobs.length ? `共 ${jobs.length} 条` : '';
+  if (!jobs || !jobs.length) {
+    $('#jobs').innerHTML = '<div class="empty">暂无任务</div>';
+    return;
+  }
+  const rows = jobs.map((j, i) => `<tr>
+    <td class="num">${i + 1}</td>
+    <td class="name" title="${esc(j.name)}">${esc(j.name)}</td>
+    <td>${esc(j.size_text || '—')}</td>
+    <td>${Number(j.copies) || 1}</td>
+    <td>${esc(j.duplex_text || '单面')}</td>
+    <td>${esc(j.paper_text || 'A4 / 600 dpi')}</td>
+    <td><span class="tag ${esc(j.status)}">${esc(j.status_text || '未知')}</span></td>
+    <td class="msg" title="${esc(j.message)}">${esc(j.message || '—')}</td>
+    <td class="time">${esc(j.print_text || '—')}</td>
+    <td>${esc(j.client_ip || '—')}</td>
+  </tr>`).join('');
+  $('#jobs').innerHTML = `<div class="tablebox"><table>
+    <thead><tr>
+      <th>序号</th><th>文件名称</th><th>大小</th><th>份数</th><th>单双面</th>
+      <th>纸张 / 精度</th><th>状态</th><th>说明</th><th>打印时间</th><th>来源 IP</th>
+    </tr></thead><tbody>${rows}</tbody></table></div>`;
+}
+
+async function load() {
+  try {
+    const r = await fetch('/api/state');
+    const j = await r.json();
+    renderPrinter(j.printer || {});
+    renderJobs(j.jobs || []);
+  } catch (e) { /* 忽略轮询失败 */ }
+}
+
+$('#paper').onchange = () => { if (files.length) buildPreview(); };
+$('#fit').onchange = () => { if (files.length) buildPreview(); };
+$('#btnPrint').onclick = doPrint;
+$('#btnTest').onclick = testPage;
+$('#btnRefresh').onclick = () => { load(); flash('状态已刷新', 'ok'); };
+load();
+setInterval(load, 4000);
+</script>
+</body>
+</html>

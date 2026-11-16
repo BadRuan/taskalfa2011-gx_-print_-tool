@@ -1,0 +1,15 @@
+# 运行时数据（作业记录、预览缓存）不纳入版本管理
+data/
+*.log
+
+# Python
+__pycache__/
+*.py[cod]
+
+# 临时产物
+*.raster
+*.tmp
+*.swp
+
+# macOS
+.DS_Store
