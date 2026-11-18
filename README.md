@@ -65,33 +65,155 @@ capture_proxy.py              # 抓包代理：8080 → 打印机 9100，落盘�
 > ⚠️ 挂载源路径在**创建容器时写死**。以后再移动数据目录，必须重新 `./run.sh` 重建容器，
 > 否则 `podman start` 报 `getxattr ...: no such file or directory`（2026-11-18 踩过）。
 
-## 部署（目标机：fedora）
+## 部署指南（Podman / Docker）
+
+### 端口与目录约定（部署前先看这个）
+
+| 项 | 值 | 说明 |
+|---|---|---|
+| **Web 服务端口** | **8080/tcp** | 唯一需要对外开放的端口。容器内 `EXPOSE 8080`、监听 `WEB_PORT`（默认 8080）；本项目默认 `--network=host`，所以宿主直接占用 8080 |
+| 打印机数据口（出向） | `192.168.0.199:9100/tcp` | 服务主动连打印机发 KPSL 流，**不需要映射、不需要开防火墙** |
+| 打印机 SNMP（出向） | `192.168.0.199:161/udp` | 查在线状态 / 面板文本 / 累计页数 |
+| **目录映射** | `<宿主>…/data` → 容器 **`/data`** | 作业、预览、`jobs.json`、测试素材全在这里；**容器删了重建数据也不丢**，镜像里没有任何业务数据 |
+| 其它入站端口 | 无 | 容器不需要其它任何入站端口 |
+
+- 默认访问地址：`http://<主机IP>:8080/`
+- 防火墙只需放行 8080（firewalld）：
+  ```bash
+  sudo firewall-cmd --add-port=8080/tcp --permanent && sudo firewall-cmd --reload
+  ```
+
+### 方式一：一键脚本（Podman，推荐）
 
 ```bash
-# 1. 拿到代码（git 克隆，或把目录同步过去）
+# 1. 拿到代码
 git clone git@gitee.com:ruanfumin/taskalfa2011-gx_-print_-tool.git ~/Documents/taskalfa-print
+cd ~/Documents/taskalfa-print
 
-# 2. 构建 + 重启 + 健康检查（自动创建数据目录、构建镜像、重建容器、curl 健康检查）
-cd ~/Documents/taskalfa-print && ./run.sh
-
-# 3. 打开界面
-#    http://<fedora-ip>:8080/       （容器用 --network=host）
+# 2. 构建 + 重启 + 健康检查
+./run.sh
 ```
 
-改代码后只需重复第 2 步（代码是 COPY 进镜像的，必须重建镜像）。
-**作业记录不会丢**：数据在仓库外的 `~/Documents/Docker/tasklafa_print/data/`，容器删了重建也不影响。
-旧机器迁移时，把整个 `data` 目录拷回原路径再 `./run.sh` 即可。
+`./run.sh` 依次做：`mkdir -p` 数据目录 → `podman build --format docker -f Dockerfile` → 删旧容器 → `podman run`（参数见下）→ `curl /api/health` 确认。
 
-`run.sh` 还支持：
+> 以后改代码只需重跑 `./run.sh`。**作业记录不会丢**：数据在仓库外的
+> `~/Documents/Docker/tasklafa_print/data/`，容器删了重建也不影响。
 
-| 命令 | 作用 |
+### 方式二：手动 podman 命令（与 run.sh 核心等价）
+
+```bash
+# 数据目录先建好（挂载源必须存在）
+mkdir -p /home/<你>/Documents/Docker/tasklafa_print/data
+
+# 构建镜像（--format docker 是为了启用 Dockerfile 里的 HEALTHCHECK）
+podman build --format docker -t taskalfa-print:latest .
+
+# 启动容器
+podman run -d --name taskalfa-print \
+  --restart=unless-stopped \
+  --network=host \
+  -e PRINTER_IP=192.168.0.199 \
+  -e PRINTER_PORT=9100 \
+  -e WEB_PORT=8080 \
+  -e TZ=Asia/Shanghai \
+  -v /home/<你>/Documents/Docker/tasklafa_print/data:/data:Z \
+  taskalfa-print:latest
+```
+
+参数含义：
+
+- `--network=host`：容器直接用宿主网络栈，8080 监听在宿主上（**此时 `-p` 端口映射无效**）。本服务要用 SNMP 查状态、主动连打印机 9100，host 网络最省事，也是本项目默认写法。
+- `-v …/data:/data:Z`：**唯一必须的目录映射**。`:Z` 是 SELinux 重打标签（Fedora/RHEL 必须，否则 `PermissionError: '/data/jobs'`）；Debian/Ubuntu 无 SELinux 可去掉 `:Z`。
+- `--restart=unless-stopped`：宿主重启后自动拉起容器。
+- 容器名 `taskalfa-print`、镜像名 `taskalfa-print:latest`：`run.sh` 与本文档都按这个名字引用。
+
+### 方式三：Docker（不用 host 网络，用端口映射）
+
+```bash
+docker build -t taskalfa-print:latest .
+
+docker run -d --name taskalfa-print \
+  --restart=unless-stopped \
+  -p 8080:8080 \
+  -e PRINTER_IP=192.168.0.199 \
+  -e PRINTER_PORT=9100 \
+  -e WEB_PORT=8080 \
+  -e TZ=Asia/Shanghai \
+  -v /path/to/data:/data \
+  taskalfa-print:latest
+```
+
+- `-p 8080:8080` = `宿主端口:容器端口`。容器内监听的是 `WEB_PORT`，**改端口时 `WEB_PORT` 和 `-p` 要一起改**（例如 `-e WEB_PORT=9090 -p 9090:9090`）。
+- Docker 镜像里的 `HEALTHCHECK` 原生生效；`--network=host` + `-p` 二选一，不要同时用。
+
+### 方式四：compose（docker compose / podman-compose 通用）
+
+```yaml
+# docker-compose.yml（放在仓库根目录）
+services:
+  taskalfa-print:
+    build: .
+    image: taskalfa-print:latest
+    container_name: taskalfa-print
+    restart: unless-stopped
+    network_mode: host          # 想改成端口映射：删这行，换成 ports: ["8080:8080"]
+    environment:
+      PRINTER_IP: 192.168.0.199
+      PRINTER_PORT: "9100"
+      WEB_PORT: "8080"
+      TZ: Asia/Shanghai
+    volumes:
+      - /home/ruanfumin/Documents/Docker/tasklafa_print/data:/data:Z   # 无 SELinux 的系统去掉 :Z
+```
+
+```bash
+docker compose up -d --build      # 或 podman-compose up -d --build
+```
+
+### 环境变量
+
+| 变量 | 默认值 | 说明 |
+|---|---|---|
+| `PRINTER_IP` | `192.168.0.199` | 打印机 IP |
+| `PRINTER_PORT` | `9100` | 打印机数据端口 |
+| `WEB_PORT` | `8080` | 服务在**容器内**监听的端口 |
+| `TZ` | `Asia/Shanghai` | 时区（任务列表的打印时间按它显示） |
+| `DATA_DIR` | `/data` | 容器内数据目录，必须与挂载点一致，**不要改** |
+
+### 日常运维
+
+| 操作 | Podman（run.sh） | 等价手动命令 |
+|---|---|---|
+| 构建 + 重建 + 健康检查 | `./run.sh` | `podman build … && podman rm -f … && podman run …` |
+| 看日志 | `./run.sh logs` | `podman logs -f --tail 100 taskalfa-print`（docker 同名替换） |
+| 停止并删除容器 | `./run.sh stop` | `podman rm -f taskalfa-print`（**数据不受影响**） |
+| 看容器状态 | `./run.sh state` | `podman ps -a --filter name=taskalfa-print` |
+| 健康检查 | — | `curl http://127.0.0.1:8080/api/health` → `{"ok": true}` |
+| 健康状态 | — | `podman inspect taskalfa-print --format '{{.State.Health.Status}}'` → `healthy` |
+
+### 数据备份与迁移
+
+```bash
+# 备份（整个数据目录，含作业记录与历史预览）
+tar czf taskalfa-data-$(date +%F).tgz -C /home/<你>/Documents/Docker/tasklafa_print data
+
+# 恢复 / 换机器：解包回原路径，再 ./run.sh 重建容器
+tar xzf taskalfa-data-2026-11-18.tgz -C /home/<你>/Documents/Docker/tasklafa_print/
+cd ~/Documents/taskalfa-print && ./run.sh
+```
+
+> ⚠️ **挂载源路径在创建容器时写死**。以后再移动数据目录，必须重新 `./run.sh` 重建容器，
+> 否则 `podman start` 报 `getxattr /旧路径/data: no such file or directory`（2026-11-18 踩过）。
+
+### 故障排查
+
+| 现象 | 原因与解法 |
 |---|---|
-| `bash run.sh` | 构建镜像 + 重启容器 + 健康检查 |
-| `bash run.sh logs` | 跟踪容器日志 |
-| `bash run.sh stop` | 停止并删除容器 |
-| `bash run.sh state` | 查看容器状态 |
-
-环境变量（`run.sh` 里已设好默认值）：`PRINTER_IP=192.168.0.199`、`PRINTER_PORT=9100`、`WEB_PORT=8080`、`DATA_DIR=/data`。
+| `podman start` 报 `getxattr …/data: no such file or directory` | 挂载源目录被移动/删除 → 把数据放回原路径，或改 `run.sh` 里的 `DATA`，然后 `./run.sh` 重建容器 |
+| `PermissionError: '/data/jobs'` | SELinux 拦截 → 挂载少了 `:Z`，重建容器 |
+| 页面打不开 8080 | 容器没起来（`podman ps`）/ 防火墙没放行 8080 / `WEB_PORT` 与映射端口不一致 |
+| 状态卡显示打印机离线 | `PRINTER_IP` 是否正确、9100/161 出向是否通、打印机是否休眠或无纸 |
+| 构建时拉不到基础镜像 | 本环境 `docker.io` 不可达，基础镜像走 `quay.io/fedora/fedora`（Dockerfile 已写） |
 
 ## Web 界面
 
