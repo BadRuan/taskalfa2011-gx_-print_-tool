@@ -3,12 +3,17 @@
 # 用法: ./run.sh          # 构建并(重)启动
 #       ./run.sh logs     # 查看日志
 #       ./run.sh stop     # 停止并删除容器
+#
+# 目录约定：
+#   本仓库（设计文件）      = ~/Documents/taskalfa-print
+#   持久化数据（容器 /data） = $DATA（下方绝对路径，不随仓库走）
+#   移动过数据目录后必须重新 ./run.sh 重建容器——挂载源是创建时写死的。
 set -euo pipefail
 cd "$(dirname "$0")"
 
 IMAGE=taskalfa-print:latest
 NAME=taskalfa-print
-DATA="$PWD/data"
+DATA=/home/ruanfumin/Documents/Docker/tasklafa_print/data
 PORT=8080
 
 case "${1:-start}" in
@@ -23,7 +28,8 @@ esac
 mkdir -p "$DATA"
 
 echo "==> 构建镜像 $IMAGE"
-podman build -t "$IMAGE" "$PWD"
+# --format docker：OCI 格式会忽略 HEALTHCHECK，必须用 docker 格式（见 Dockerfile 注释）
+podman build --format docker -f Dockerfile -t "$IMAGE" "$PWD"
 
 echo "==> 重新启动容器"
 podman rm -f "$NAME" >/dev/null 2>&1 || true

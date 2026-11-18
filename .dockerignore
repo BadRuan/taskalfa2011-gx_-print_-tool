@@ -1,0 +1,10 @@
+# 构建上下文只保留镜像真正需要的：Dockerfile 只 COPY app/ 与 rastertokpsl_A3
+.git
+*.md
+run.sh
+capture_proxy.py
+rastertokpsl_amd64
+experiments/
+data/
+*.log
+__pycache__/

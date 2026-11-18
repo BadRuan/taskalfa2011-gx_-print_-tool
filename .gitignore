@@ -1,15 +1,7 @@
-# 运行时数据（作业记录、预览缓存）不纳入版本管理
+# 持久化数据不入库（实际位置：~/Documents/Docker/tasklafa_print/data，
+# 由 run.sh 挂载进容器 /data；这里只做兜底，防止有人在仓库里造 data/）
 data/
 *.log
-
-# Python
 __pycache__/
-*.py[cod]
-
-# 临时产物
-*.raster
-*.tmp
-*.swp
-
-# macOS
-.DS_Store
+*.pyc
+.old-container-inspect.json
