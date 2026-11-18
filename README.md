@@ -38,33 +38,49 @@ TCP 192.168.0.199:9100
 ## 目录结构
 
 ```
-Containerfile                  # 镜像：fedora + python3/Pillow/ghostscript/libreoffice + 官方滤镜
-run.sh                         # 构建、重启容器、健康检查（bash run.sh，脚本没有执行位）
-app/server.py                  # 服务主程序：HTTP API + 转换 + KPSL 生成 + 作业队列
-app/ui.html                    # 中文单页 UI（含打印预览）
-rastertokpsl_A3                # 京瓷官方滤镜（ELF x86-64，217KB）
+Dockerfile                    # 镜像：fedora + python3/Pillow/ghostscript/libreoffice + 官方滤镜
+                              #   （原名 Containerfile，2026-11 更名，docker/podman 通用）
+.dockerignore                 # 构建上下文只留 app/ 与 rastertokpsl_A3
+.gitignore                    # 兜底：data/、日志、__pycache__ 不入库
+run.sh                        # 构建、重启容器、健康检查（./run.sh，脚本有执行位）
+app/server.py                 # 服务主程序：HTTP API + 转换 + KPSL 生成 + 作业队列
+app/ui.html                   # 中文单页 UI（含打印预览）
+rastertokpsl_A3               # 京瓷官方滤镜（ELF x86-64，217KB）
 kyocera_linuxdrv_..._v8.1305.zip  # 官方驱动包（PPD + 滤镜 + 安装脚本，逆向依据）
-技术档案.md                     # ★ 全部技术结论、公式、踩坑清单
-captures/                      # Windows 驱动正常打印的 9100 抓包（KPSL 金标准样本）
-experiments/                   # 调试期的对照流（C/D/E.kpsl、标定页 cal.pdf）
-tools/                         # 解析 / 打补丁 / 发送 的一次性脚本
-capture_proxy.py               # 抓包代理：8080 → 打印机 9100，落盘原始字节
+技术档案.md                    # ★ 全部技术结论、公式、踩坑清单
+captures/                     # Windows 驱动正常打印的 9100 抓包（KPSL 金标准样本）
+experiments/                  # 调试期的对照流（C/D/E.kpsl、标定页 cal.pdf、t1~t7.kpsl）
+tools/                        # 解析 / 打补丁 / 发送 的一次性脚本
+capture_proxy.py              # 抓包代理：8080 → 打印机 9100，落盘原始字节
 ```
+
+**持久化数据不在仓库里**（2026-11 起的目录约定）：
+
+```
+~/Documents/taskalfa-print/                    # 本仓库：设计文件（代码/文档/实验），入 git
+~/Documents/Docker/tasklafa_print/data/        # 容器 /data 卷：jobs/、preview/、jobs.json、testkit/
+                                               #   不入 git，run.sh 以 -v .../data:/data:Z 挂载
+```
+
+> ⚠️ 挂载源路径在**创建容器时写死**。以后再移动数据目录，必须重新 `./run.sh` 重建容器，
+> 否则 `podman start` 报 `getxattr ...: no such file or directory`（2026-11-18 踩过）。
 
 ## 部署（目标机：fedora）
 
 ```bash
-# 1. 把整个目录同步到 fedora
-scp -r . fedora:~/taskalfa-print/
+# 1. 拿到代码（git 克隆，或把目录同步过去）
+git clone git@gitee.com:ruanfumin/taskalfa2011-gx_-print_-tool.git ~/Documents/taskalfa-print
 
-# 2. 构建 + 重启 + 健康检查
-ssh fedora 'cd ~/taskalfa-print && bash run.sh'
+# 2. 构建 + 重启 + 健康检查（自动创建数据目录、构建镜像、重建容器、curl 健康检查）
+cd ~/Documents/taskalfa-print && ./run.sh
 
 # 3. 打开界面
 #    http://<fedora-ip>:8080/       （容器用 --network=host）
 ```
 
-改代码后只需重复第 2 步（代码是 COPY 进镜像的，必须重建镜像；`data/` 是 bind mount，不会丢作业记录）。
+改代码后只需重复第 2 步（代码是 COPY 进镜像的，必须重建镜像）。
+**作业记录不会丢**：数据在仓库外的 `~/Documents/Docker/tasklafa_print/data/`，容器删了重建也不影响。
+旧机器迁移时，把整个 `data` 目录拷回原路径再 `./run.sh` 即可。
 
 `run.sh` 还支持：
 
