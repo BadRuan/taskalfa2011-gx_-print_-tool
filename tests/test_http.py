@@ -3,6 +3,7 @@
 import json
 import os
 import threading
+import time
 import unittest
 import urllib.error
 import urllib.request
@@ -27,9 +28,13 @@ class HttpSmokeTests(unittest.TestCase):
         cls.httpd.server_close()
 
     def setUp(self):
-        # 用例共享同一进程状态：清掉上一个用例留下的作业
+        # 用例共享同一进程状态：清掉上一个用例留下的作业与缓存
         with server._lock:
             server._jobs.clear()
+        deadline = time.time() + 3
+        while server._refreshing and time.time() < deadline:
+            time.sleep(0.01)                     # 等上个用例踢起的后台探测收尾
+        server._status_cache.update(ts=0, value=None)
 
     def _url(self, path):
         return "http://127.0.0.1:%d%s" % (self.port, path)
@@ -74,6 +79,80 @@ class HttpSmokeTests(unittest.TestCase):
         status, body = self._get("/api/nope")
         self.assertEqual(status, 404)
         self.assertIn("未找到该接口", body.decode())
+
+    def test_status_fresh_cache_never_probes(self):
+        sentinel = {"reachable": True, "snmp_ok": True, "model": "缓存",
+                    "page_count": 1, "panel": "", "state": "", "port_open": True}
+        server._status_cache.update(ts=time.time(), value=sentinel)
+        orig = server.snmp_get
+        server.snmp_get = lambda *a, **k: (_ for _ in ()).throw(
+            AssertionError("缓存新鲜时不应发起真实探测"))
+        try:
+            self.assertIs(server.printer_status(), sentinel)
+        finally:
+            server.snmp_get = orig
+
+    def test_status_stale_returns_old_value_without_blocking(self):
+        # 离线探测约 9s：过期时必须立刻回旧值，后台补测（stale-while-revalidate）
+        old = {"reachable": False, "snmp_ok": False, "model": "旧值",
+               "page_count": None, "panel": "", "state": "", "port_open": False}
+        server._status_cache.update(ts=time.time() - 999, value=old)
+        calls = []
+
+        def slow_fail(*a, **k):
+            calls.append(1)
+            time.sleep(0.8)
+            raise RuntimeError("timeout")
+
+        orig = server.snmp_get
+        server.snmp_get = slow_fail
+        try:
+            t0 = time.monotonic()
+            got = server.printer_status()
+            elapsed = time.monotonic() - t0
+            self.assertIs(got, old)              # 立刻回旧值
+            self.assertLess(elapsed, 0.3)        # 绝不等真实探测
+            deadline = time.time() + 3
+            while not calls and time.time() < deadline:
+                time.sleep(0.02)
+            self.assertTrue(calls, "应踢起后台探测线程")
+            while server._refreshing and time.time() < deadline:
+                time.sleep(0.02)
+        finally:
+            server.snmp_get = orig
+            server._status_cache.update(ts=0, value=None)
+
+    def test_state_endpoint_never_blocks_on_offline_printer(self):
+        # /api/state 在打印机离线时也必须秒回（后台探测）
+        server._status_cache.update(ts=0, value=None)
+        t0 = time.monotonic()
+        status, body = self._get("/api/state")
+        elapsed = time.monotonic() - t0
+        self.assertEqual(status, 200)
+        self.assertLess(elapsed, 1.0, "state 接口被真实探测阻塞了")
+        state = json.loads(body)
+        self.assertIn("printer", state)
+        self.assertIn("reachable", state["printer"])
+        while server._refreshing:               # 等后台线程收尾，别污染下一用例
+            time.sleep(0.02)
+        server._status_cache.update(ts=0, value=None)
+
+    def test_post_concurrency_bounded_503(self):
+        held = 0
+        try:
+            for _ in range(server.MAX_POST_CONCURRENCY):
+                self.assertTrue(server._post_slots.acquire(blocking=False))
+                held += 1
+            status, body = self._post("/api/print")
+            self.assertEqual(status, 503)
+            self.assertIn("繁忙", body.decode())
+        finally:
+            for _ in range(held):
+                server._post_slots.release()
+        # 槽位归还后恢复正常
+        status, body = self._post("/api/print")
+        self.assertEqual(status, 400)
+        self.assertIn("没有收到文件", body.decode())
 
     def test_preview_without_file_400(self):
         status, body = self._post("/api/preview")

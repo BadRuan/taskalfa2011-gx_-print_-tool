@@ -5,6 +5,7 @@ import os
 import shutil
 import struct
 import tempfile
+import time
 import unittest
 
 import server
@@ -253,6 +254,39 @@ class PagesTests(unittest.TestCase):
         with self.assertRaises(server.JobError):
             server.build_preview([("t.pdf", payload)],
                                  {"paper": "A4", "fit": True, "pages": (3, 4)})
+
+
+class CleanupTests(unittest.TestCase):
+    def test_cleanup_removes_expired_done_jobs(self):
+        old_id, keep_id = "deadbeef", "cafebabe"
+        with server._lock:
+            server._jobs[old_id] = {"id": old_id, "status": "done",
+                                    "created_ts": time.time() - 8 * 86400}
+            server._jobs[keep_id] = {"id": keep_id, "status": "done",
+                                     "created_ts": time.time()}
+        os.makedirs(os.path.join(server.JOBS_DIR, old_id), exist_ok=True)
+        try:
+            server._cleanup()                     # 加锁执行，不与 worker 抢 _jobs
+            with server._lock:
+                self.assertNotIn(old_id, server._jobs)
+                self.assertIn(keep_id, server._jobs)   # 未过期的保留
+        finally:
+            with server._lock:
+                server._jobs.pop(keep_id, None)
+                server._jobs.pop(old_id, None)
+
+    def test_cleanup_keeps_active_jobs(self):
+        jid = "abcdef01"
+        with server._lock:
+            server._jobs[jid] = {"id": jid, "status": "printing",
+                                 "created_ts": time.time() - 8 * 86400}
+        try:
+            server._cleanup()
+            with server._lock:
+                self.assertIn(jid, server._jobs)
+        finally:
+            with server._lock:
+                server._jobs.pop(jid, None)
 
 
 class SkipUnlessTools(unittest.TestCase):

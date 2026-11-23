@@ -41,6 +41,10 @@ FILTER = os.environ.get("KPSL_FILTER", "/app/rastertokpsl_A3")
 SNMP_COMMUNITY = os.environ.get("SNMP_COMMUNITY", "public")
 KEEP_DAYS = 7
 MAX_UPLOAD = 300 * 1024 * 1024
+# POST 并发上限：单个上传最多吃 300MB 内存 + 一次转换，ThreadingHTTPServer
+# 默认无界接客，几个大文件同时传就可能把宿主内存打爆 → 超限直接 503。
+MAX_POST_CONCURRENCY = 4
+_post_slots = threading.BoundedSemaphore(MAX_POST_CONCURRENCY)
 
 PAPERS = {
     "A4": (595, 842),
@@ -246,14 +250,99 @@ def _oid_to_str(raw):
 
 
 _status_cache = {"ts": 0, "value": None}
+_status_lock = threading.Lock()      # 串行化真实探测，避免并发 SNMP 风暴
+_refresh_lock = threading.Lock()
+_refreshing = False
+
+# 缓存有效期 / 后台刷新周期：探测（TCP 3s + 4 次 SNMP 1.5s）离线时约 9s，
+# 放在请求线程里做会把 /api/state 卡死 9 秒——所以只在后台跑，请求侧
+# stale-while-revalidate：有旧值立刻回旧值，同时踢一脚后台刷新。
+STATUS_TTL = 8
+STATUS_REFRESH = 5
+
+
+def _fetch_status():
+    """真实探测（同一时刻只允许一个在跑），结果写入 _status_cache。"""
+    with _status_lock:
+        now = time.time()
+        if _status_cache["value"] and now - _status_cache["ts"] < STATUS_TTL:
+            return _status_cache["value"]          # 等待期间别人已刷过
+        result = {
+            "reachable": False,
+            "model": "TASKalfa 2011",
+            "page_count": None,
+            "panel": "",
+            "state": "",
+            "snmp_ok": False,
+            "port_open": False,
+        }
+        try:
+            s = socket.create_connection((PRINTER_IP, PRINTER_PORT), 3)
+            s.close()
+            result["reachable"] = True
+            result["port_open"] = True
+        except Exception:
+            pass
+
+        try:
+            vals = snmp_get(list(SNMP_OIDS.values()))
+            result["snmp_ok"] = True
+            result["reachable"] = True
+            result["page_count"] = vals.get(SNMP_OIDS["page_count"])
+            result["panel"] = vals.get(SNMP_OIDS["panel"], "")
+            ds = vals.get(SNMP_OIDS["device_status"])
+            if isinstance(ds, int):
+                result["state"] = DEVICE_STATES.get(ds, str(ds))
+            else:
+                result["state"] = str(ds)
+            model = vals.get(SNMP_OIDS["model"])
+            if model:
+                result["model"] = model
+        except Exception:
+            result["snmp_ok"] = False
+
+        _status_cache.update(ts=time.time(), value=result)
+        return result
+
+
+def _kick_refresh():
+    """起一个后台探测线程（同一时刻至多一个）；不阻塞调用方。"""
+    global _refreshing
+    with _refresh_lock:
+        if _refreshing:
+            return
+        _refreshing = True
+
+    def run():
+        global _refreshing
+        try:
+            _fetch_status()
+        finally:
+            with _refresh_lock:
+                _refreshing = False
+
+    threading.Thread(target=run, daemon=True).start()
+
+
+def _status_loop():
+    while True:
+        try:
+            _fetch_status()
+        except Exception:
+            pass
+        time.sleep(STATUS_REFRESH)
 
 
 def printer_status(force=False):
     now = time.time()
-    if not force and _status_cache["value"] and now - _status_cache["ts"] < 4:
-        return _status_cache["value"]
-
-    result = {
+    cached = _status_cache["value"]
+    if cached and now - _status_cache["ts"] < STATUS_TTL:
+        return cached
+    if force:
+        return _fetch_status()
+    # 过期（或启动后还没测过）：立刻回旧值/占位值，后台补测
+    _kick_refresh()
+    return cached or {
         "reachable": False,
         "model": "TASKalfa 2011",
         "page_count": None,
@@ -262,33 +351,6 @@ def printer_status(force=False):
         "snmp_ok": False,
         "port_open": False,
     }
-    try:
-        s = socket.create_connection((PRINTER_IP, PRINTER_PORT), 3)
-        s.close()
-        result["reachable"] = True
-        result["port_open"] = True
-    except Exception:
-        pass
-
-    try:
-        vals = snmp_get(list(SNMP_OIDS.values()))
-        result["snmp_ok"] = True
-        result["reachable"] = True
-        result["page_count"] = vals.get(SNMP_OIDS["page_count"])
-        result["panel"] = vals.get(SNMP_OIDS["panel"], "")
-        ds = vals.get(SNMP_OIDS["device_status"])
-        if isinstance(ds, int):
-            result["state"] = DEVICE_STATES.get(ds, str(ds))
-        else:
-            result["state"] = str(ds)
-        model = vals.get(SNMP_OIDS["model"])
-        if model:
-            result["model"] = model
-    except Exception:
-        result["snmp_ok"] = False
-
-    _status_cache.update(ts=now, value=result)
-    return result
 
 
 # ---------------------------------------------------------------- conversion
@@ -700,13 +762,24 @@ def _load():
 
 
 def _cleanup():
-    now = time.time()
-    for job in list(_jobs.values()):
-        if job.get("status") in ("done", "error") and now - job.get("created_ts", now) > KEEP_DAYS * 86400:
-            _jobs.pop(job["id"], None)
-            shutil.rmtree(os.path.join(JOBS_DIR, job["id"]), ignore_errors=True)
-    purge_previews()
-    _persist()
+    with _lock:                       # _jobs 有并发读写（worker/HTTP 线程）
+        now = time.time()
+        for job in list(_jobs.values()):
+            if job.get("status") in ("done", "error") and now - job.get("created_ts", now) > KEEP_DAYS * 86400:
+                _jobs.pop(job["id"], None)
+                shutil.rmtree(os.path.join(JOBS_DIR, job["id"]), ignore_errors=True)
+        _persist()
+    purge_previews()                  # 纯文件系统操作，放锁外
+
+
+def _cleanup_loop():
+    """过期作业/预览定期清理：原来只在启动时跑一次，服务长跑会无限堆积。"""
+    while True:
+        time.sleep(30 * 60)
+        try:
+            _cleanup()
+        except Exception:
+            traceback.print_exc()
 
 
 def _update(job_id, **kw):
@@ -934,12 +1007,18 @@ class Handler(BaseHTTPRequestHandler):
 
     def do_POST(self):
         path = urlparse(self.path).path
-        length = int(self.headers.get("Content-Length") or 0)
-        if length > MAX_UPLOAD:
-            self._send(413, json.dumps({"error": "文件超过 300 MB 上限"}, ensure_ascii=False))
+        if not _post_slots.acquire(blocking=False):
+            # 不排队：读体之前先拒绝，避免内存继续涨
+            self._send(503, json.dumps({"error": "服务繁忙，请稍后重试"},
+                                       ensure_ascii=False))
             return
-        raw = self.rfile.read(length)
         try:
+            length = int(self.headers.get("Content-Length") or 0)
+            if length > MAX_UPLOAD:
+                self._send(413, json.dumps({"error": "文件超过 300 MB 上限"},
+                                           ensure_ascii=False))
+                return
+            raw = self.rfile.read(length)
             if path == "/api/print":
                 self._handle_print(raw)
             elif path == "/api/preview":
@@ -947,10 +1026,14 @@ class Handler(BaseHTTPRequestHandler):
             elif path == "/api/test":
                 self._handle_test(raw)
             else:
-                self._send(404, json.dumps({"error": "未找到该接口"}, ensure_ascii=False))
+                self._send(404, json.dumps({"error": "未找到该接口"},
+                                           ensure_ascii=False))
         except Exception:
             traceback.print_exc()
-            self._send(500, json.dumps({"error": "服务处理失败，请稍后重试"}, ensure_ascii=False))
+            self._send(500, json.dumps({"error": "服务处理失败，请稍后重试"},
+                                       ensure_ascii=False))
+        finally:
+            _post_slots.release()
 
     def _parse_multipart(self, raw):
         ctype = self.headers.get("Content-Type", "")
@@ -1099,6 +1182,8 @@ def main():
     _load()
     _cleanup()
     threading.Thread(target=_worker, daemon=True).start()
+    threading.Thread(target=_status_loop, daemon=True).start()
+    threading.Thread(target=_cleanup_loop, daemon=True).start()
     print("taskalfa-print 启动: http://0.0.0.0:%d  打印机 %s:%d"
           % (WEB_PORT, PRINTER_IP, PRINTER_PORT))
     ThreadingHTTPServer(("0.0.0.0", WEB_PORT), Handler).serve_forever()
