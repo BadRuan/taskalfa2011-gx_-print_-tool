@@ -582,6 +582,23 @@ def resolve_pages(pdf, pages, count=None):
     return first, min(last, count)
 
 
+def parse_copies(text):
+    """份数 1-99 的整数：空 → 1；非法/越界 → JobError（中文，走 400）。
+
+    旧实现 `int(fields.get("copies") or 1)` 对 "abc" 直接抛 ValueError → 500。
+    """
+    text = (text or "").strip()
+    if not text:
+        return 1
+    try:
+        val = int(text)
+    except ValueError:
+        raise JobError("份数应为 1-99 的整数") from None
+    if not 1 <= val <= 99:
+        raise JobError("份数应为 1-99 的整数")
+    return val
+
+
 def merge_pdfs(pdfs, out):
     if len(pdfs) == 1:
         if os.path.abspath(pdfs[0]) != os.path.abspath(out):
@@ -1013,7 +1030,14 @@ class Handler(BaseHTTPRequestHandler):
                                        ensure_ascii=False))
             return
         try:
-            length = int(self.headers.get("Content-Length") or 0)
+            try:
+                length = int(self.headers.get("Content-Length") or 0)
+            except ValueError:
+                length = -1          # Content-Length 不是数字（如 "abc"）
+            if length < 0:
+                self._send(400, json.dumps({"error": "请求头 Content-Length 不合法"},
+                                           ensure_ascii=False))
+                return
             if length > MAX_UPLOAD:
                 self._send(413, json.dumps({"error": "文件超过 300 MB 上限"},
                                            ensure_ascii=False))
@@ -1093,10 +1117,12 @@ class Handler(BaseHTTPRequestHandler):
             self._send(400, json.dumps({"error": "没有收到文件"}, ensure_ascii=False))
             return
         pages = None
+        copies = 1
         try:
             paper = fields.get("paper") if fields.get("paper") in PAPERS else "A4"
             fit = fields.get("fit") in ("1", "true", "on")
             pages = parse_pages(fields.get("pages"))
+            copies = parse_copies(fields.get("copies"))
         except JobError as exc:
             self._send(400, json.dumps({"error": str(exc)}, ensure_ascii=False))
             return
@@ -1132,7 +1158,7 @@ class Handler(BaseHTTPRequestHandler):
             "id": uuid.uuid4().hex[:8],
             "name": name or "未命名文件",
             "size": size,
-            "copies": max(1, min(99, int(fields.get("copies") or 1))),
+            "copies": copies,
             "duplex": fields.get("duplex") if fields.get("duplex") in ("long", "short") else "off",
             "paper": paper,
             "dpi": RASTER_DPI,

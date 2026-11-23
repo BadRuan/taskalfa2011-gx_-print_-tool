@@ -182,6 +182,27 @@ class HttpSmokeTests(unittest.TestCase):
         self.assertEqual(status, 400)
         self.assertIn("页码范围不合法", body.decode())
 
+    def test_print_bad_copies_400(self):
+        # 旧实现 int("abc") 抛 ValueError → 500
+        for bad in ("abc", "0", "150"):
+            raw, ctype = MultipartTests._body(
+                {"copies": bad}, {"a.pdf": ("a.pdf", b"%PDF-1.4")})
+            status, body = self._post("/api/print", raw, ctype)
+            self.assertEqual(status, 400, (bad, body))
+            self.assertIn("份数", body.decode())
+
+    def test_bad_content_length_400(self):
+        # urllib 不会替我们发非法头，用裸 socket 手工构造
+        import socket as sock
+        req = (b"POST /api/print HTTP/1.0\r\n"
+               b"Content-Type: application/json\r\n"
+               b"Content-Length: abc\r\n\r\n")
+        with sock.create_connection(("127.0.0.1", self.port), 5) as s:
+            s.sendall(req)
+            resp = s.recv(1024)
+        self.assertIn(b" 400 ", resp.split(b"\r\n")[0] + b" ")
+        self.assertIn("Content-Length".encode(), resp)
+
     @staticmethod
     def _fake_preview(token, meta):
         pdir = os.path.join(server.PREVIEW_DIR, token)

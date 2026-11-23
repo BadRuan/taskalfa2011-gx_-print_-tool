@@ -256,6 +256,19 @@ class PagesTests(unittest.TestCase):
                                  {"paper": "A4", "fit": True, "pages": (3, 4)})
 
 
+class CopiesTests(unittest.TestCase):
+    def test_parse_valid(self):
+        self.assertEqual(server.parse_copies(None), 1)
+        self.assertEqual(server.parse_copies(""), 1)
+        self.assertEqual(server.parse_copies(" 5 "), 5)
+        self.assertEqual(server.parse_copies("99"), 99)
+
+    def test_parse_invalid(self):
+        for bad in ("abc", "0", "100", "-2", "1.5", "两份"):
+            with self.assertRaises(server.JobError, msg=bad):
+                server.parse_copies(bad)
+
+
 class CleanupTests(unittest.TestCase):
     def test_cleanup_removes_expired_done_jobs(self):
         old_id, keep_id = "deadbeef", "cafebabe"
