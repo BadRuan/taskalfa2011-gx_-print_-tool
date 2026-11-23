@@ -116,18 +116,25 @@ def _ber_int(n):
 
 def _ber_oid(oid):
     parts = [int(x) for x in oid.split(".")]
-    body = bytes([parts[0] * 40 + parts[1]])
+    # 首子标识符 = arc1*40+arc2，可能 >=128（如 1.80 → 120 没事，2.x 可到 4 位数），
+    # 必须按 base-128 多字节编码，单字节会像旧实现那样直接 ValueError。
+    first = parts[0] * 40 + parts[1]
+    body = bytearray(_ber_subid(first))
     for p in parts[2:]:
-        if p < 0x80:
-            body += bytes([p])
-        else:
-            chunk = []
-            while p:
-                chunk.append(p & 0x7F)
-                p >>= 7
-            chunk.reverse()
-            body += bytes([c | 0x80 for c in chunk[:-1]] + [chunk[-1]])
-    return b"\x06" + _ber_len(len(body)) + body
+        body += _ber_subid(p)
+    return b"\x06" + _ber_len(len(body)) + bytes(body)
+
+
+def _ber_subid(p):
+    """一个子标识符的 base-128 变长编码。"""
+    if p < 0x80:
+        return bytes([p])
+    chunk = []
+    while p:
+        chunk.append(p & 0x7F)
+        p >>= 7
+    chunk.reverse()
+    return bytes([c | 0x80 for c in chunk[:-1]] + [chunk[-1]])
 
 
 def _ber_parse(data, pos=0):
@@ -217,13 +224,24 @@ def snmp_get(oids, timeout=1.5):
 def _oid_to_str(raw):
     if not raw:
         return ""
-    parts = [str(raw[0] // 40), str(raw[0] % 40)]
-    val = 0
-    for b in raw[1:]:
+    # 逐字节收 base-128，首子标识符解出来后再拆成 arc1/arc2（与 _ber_oid 对称）
+    vals, val = [], 0
+    for b in raw:
         val = (val << 7) | (b & 0x7F)
         if not b & 0x80:
-            parts.append(str(val))
+            vals.append(val)
             val = 0
+    if not vals:
+        return ""
+    first = vals[0]
+    # X.690：arc1∈{0,1,2}，arc2<40；arc1=2 时 arc2 无上界（first>=80）
+    if first < 40:
+        arcs = [0, first]
+    elif first < 80:
+        arcs = [1, first - 40]
+    else:
+        arcs = [2, first - 80]
+    parts = [str(a) for a in arcs] + [str(v) for v in vals[1:]]
     return ".".join(parts)
 
 
@@ -453,10 +471,53 @@ SEND_RETRY_WAIT = 5
 
 # ---------------------------------------------------------------- preview
 def pdf_page_count(pdf):
-    out = _run(["gs", "-q", "-dNODISPLAY", "-dNOSAFER", "-dBATCH", "-dNOPAUSE",
-                "-c", "(%s) (r) file runpdfbegin pdfpagecount = quit" % pdf])
-    txt = out.decode("utf-8", "replace").strip().split()
-    return int(txt[-1]) if txt else 0
+    """用 poppler 的 pdfinfo 数页数（镜像里 poppler-utils 已带，argv 传参对任意
+    文件名安全）。
+
+    旧实现是 `gs -c "(路径) (r) file runpdfbegin ..."` 拼 PostScript：路径含
+    `)` / `\\` 会截断出错，`-dNOSAFER` 下还是一整条 PS 执行面——虽然当前唯一
+    调用方传的是固定名 job.pdf，但这是留给未来调用者的地雷，直接换掉。
+    """
+    out = _run(["pdfinfo", pdf], timeout=60)
+    m = re.search(r"(?m)^Pages:\s+(\d+)", out.decode("utf-8", "replace"))
+    if not m:
+        raise RuntimeError("pdfinfo: no Pages field")
+    return int(m.group(1))
+
+
+PAGES_RE = re.compile(r"^\s*(\d+)\s*-\s*(\d+)\s*$")
+
+
+def parse_pages(text):
+    """解析「起-止」页码范围：空 → None；格式/次序错 → JobError（中文，走 400）。"""
+    text = (text or "").strip()
+    if not text:
+        return None
+    m = PAGES_RE.match(text)
+    if not m:
+        raise JobError("页码范围格式应如 1-4（起止均为正整数）")
+    first, last = int(m.group(1)), int(m.group(2))
+    if first < 1 or last < first:
+        raise JobError("页码范围不合法：起始页至少为 1，且结束页不小于起始页")
+    return first, last
+
+
+def resolve_pages(pdf, pages, count=None):
+    """把页码范围对到实际页数：起始页超界 → JobError；结束页超界 → 夹取。
+
+    旧链路直接把范围塞给 gs：FirstPage 超界时 gs 只打一行英文错误、不产出
+    光栅，最后报「打印指令生成失败」，用户完全看不懂。
+    """
+    if not pages:
+        return None
+    if count is None:
+        count = pdf_page_count(pdf)
+    first, last = pages
+    if first < 1 or last < first:
+        raise JobError("页码范围不合法：起始页至少为 1，且结束页不小于起始页")
+    if first > count:
+        raise JobError("起始页 %d 超出文档页数（共 %d 页）" % (first, count))
+    return first, min(last, count)
 
 
 def merge_pdfs(pdfs, out):
@@ -515,9 +576,6 @@ def build_preview(upload_parts, meta):
             f.write(payload)
         names.append(safe)
     total = sum(len(payload) for _, payload in upload_parts)
-    with open(os.path.join(workdir, "meta.json"), "w", encoding="utf-8") as f:
-        json.dump({"name": "、".join(names)[:80], "size": total,
-                   "created": time.time()}, f, ensure_ascii=False)
     pdf = job_pdf({"files": names}, workdir)
     target = os.path.join(workdir, "job.pdf")
     if os.path.abspath(pdf) != os.path.abspath(target):
@@ -527,14 +585,25 @@ def build_preview(upload_parts, meta):
             os.unlink(os.path.join(workdir, name))
         except Exception:
             pass
-    count = pdf_page_count(target)
+    try:
+        count = pdf_page_count(target)
+    except Exception:
+        raise JobError("文件已损坏或不是有效的 PDF") from None
     if count <= 0:
         raise JobError("文件里没有可打印的页面")
     paper = meta.get("paper", "A4")
     fit = bool(meta.get("fit"))
-    rendered = min(count, PREVIEW_MAX_PAGES)
+    rng = resolve_pages(target, meta.get("pages"), count)
+    first, last = rng if rng else (1, count)
+    span = last - first + 1
+    # meta.json 是 token 打印的几何权威（WYSIWYG：预览什么样就打什么样）
+    with open(os.path.join(workdir, "meta.json"), "w", encoding="utf-8") as f:
+        json.dump({"name": "、".join(names)[:80], "size": total,
+                   "created": time.time(), "paper": paper, "fit": fit,
+                   "pages": list(rng) if rng else None}, f, ensure_ascii=False)
+    rendered = min(span, PREVIEW_MAX_PAGES)
     images = []
-    for page in range(1, rendered + 1):
+    for page in range(first, first + rendered):
         png = os.path.join(workdir, "p%d.png" % page)
         render_preview_page(target, png, page, paper, fit)
         pw = ph = 0
@@ -547,7 +616,7 @@ def build_preview(upload_parts, meta):
     pw_pt, ph_pt = PAPERS.get(paper, PAPERS["A4"])
     cw_pt, ch_pt = page_box(paper)
     return {"ok": True, "token": token, "pages": count, "rendered": rendered,
-            "truncated": count > rendered,
+            "truncated": rendered < span, "range": [first, last],
             "paper": paper, "fit": fit,
             "paper_pt": [pw_pt, ph_pt], "content_pt": [cw_pt, ch_pt],
             "margin_pt": list(PAGE_MARGIN), "images": images}
@@ -675,7 +744,7 @@ def _worker():
                 "copies": job["copies"],
                 "duplex": job["duplex"],
                 "fit": job["fit"],
-                "pages": job.get("pages"),
+                "pages": resolve_pages(pdf, job.get("pages")),
                 "title": job["name"],
             }
             raster = os.path.join(workdir, "page.raster")
@@ -917,11 +986,12 @@ class Handler(BaseHTTPRequestHandler):
         if not files:
             self._send(400, json.dumps({"error": "没有收到文件"}, ensure_ascii=False))
             return
-        meta = {
-            "paper": fields.get("paper") if fields.get("paper") in PAPERS else "A4",
-            "fit": fields.get("fit") in ("1", "true", "on"),
-        }
         try:
+            meta = {
+                "paper": fields.get("paper") if fields.get("paper") in PAPERS else "A4",
+                "fit": fields.get("fit") in ("1", "true", "on"),
+                "pages": parse_pages(fields.get("pages")),
+            }
             info = build_preview(files, meta)
         except JobError as exc:
             self._send(400, json.dumps({"error": str(exc)}, ensure_ascii=False))
@@ -940,10 +1010,13 @@ class Handler(BaseHTTPRequestHandler):
             self._send(400, json.dumps({"error": "没有收到文件"}, ensure_ascii=False))
             return
         pages = None
-        if fields.get("pages"):
-            m = re.match(r"^\s*(\d+)\s*-\s*(\d+)\s*$", fields["pages"])
-            if m:
-                pages = (int(m.group(1)), int(m.group(2)))
+        try:
+            paper = fields.get("paper") if fields.get("paper") in PAPERS else "A4"
+            fit = fields.get("fit") in ("1", "true", "on")
+            pages = parse_pages(fields.get("pages"))
+        except JobError as exc:
+            self._send(400, json.dumps({"error": str(exc)}, ensure_ascii=False))
+            return
         name = os.path.basename(files[0][0])[:80] if files else ""
         size = sum(len(p) for _, p in files)
         if token:
@@ -960,6 +1033,15 @@ class Handler(BaseHTTPRequestHandler):
                     meta = json.load(f)
                 name = meta.get("name") or name
                 size = meta.get("size") or size
+                # 几何参数以预览时的 meta 为权威：预览渲染成什么样，就打什么样
+                if meta.get("paper") in PAPERS:
+                    paper = meta["paper"]
+                if "fit" in meta:
+                    fit = bool(meta["fit"])
+                if "pages" in meta:
+                    mp = meta.get("pages")
+                    pages = (int(mp[0]), int(mp[1])) if (
+                        isinstance(mp, list) and len(mp) == 2) else None
             except Exception:
                 pass
             name = name or "打印预览.pdf"
@@ -969,9 +1051,9 @@ class Handler(BaseHTTPRequestHandler):
             "size": size,
             "copies": max(1, min(99, int(fields.get("copies") or 1))),
             "duplex": fields.get("duplex") if fields.get("duplex") in ("long", "short") else "off",
-            "paper": fields.get("paper") if fields.get("paper") in PAPERS else "A4",
+            "paper": paper,
             "dpi": RASTER_DPI,
-            "fit": fields.get("fit") in ("1", "true", "on"),
+            "fit": fit,
             "pages": pages,
             "status": "pending",
             "message": "排队中",

@@ -164,6 +164,8 @@ let files = [];
 let duplex = 'off';
 let previewToken = null;      // 预览生成后复用它的 PDF，打印时不必重传
 let previewPages = [];
+let previewRange = [1, 0];    // 实际渲染/打印的页码范围（文档页号）
+let previewTotal = 0;         // 文档总页数
 let previewSeq = 0;           // 丢弃过期预览响应
 let previewBusy = false;
 
@@ -198,6 +200,8 @@ drop.addEventListener('drop', (e) => setFiles(e.dataTransfer.files));
 function hidePreview() {
   previewToken = null;
   previewPages = [];
+  previewRange = [1, 0];
+  previewTotal = 0;
   $('#previewCard').style.display = 'none';
   $('#previewImg').removeAttribute('src');
   $('#thumbs').innerHTML = '';
@@ -215,11 +219,18 @@ function setPreviewPage(page) {
   $('#thumbs').querySelectorAll('.thumb').forEach((el) => {
     el.classList.toggle('on', Number(el.dataset.p) === page);
   });
-  $('#previewMeta').textContent = `第 ${page} / ${previewPages.length} 页`;
+  const [rf, rl] = previewRange;
+  $('#previewMeta').textContent = (rf === 1 && rl === previewTotal)
+    ? `第 ${page} / ${previewTotal} 页`
+    : `第 ${page} 页 · 打印范围 ${rf}-${rl} · 共 ${previewTotal} 页`;
 }
 
 function renderPreview(j) {
   $('#previewCard').style.display = '';
+  previewRange = j.range || [1, j.pages];
+  previewTotal = j.pages;
+  const [rf, rl] = previewRange;
+  const span = rl - rf + 1;
   const [pw, ph] = j.paper_pt;
   const [cw, ch] = j.content_pt;
   const [mx, my] = j.margin_pt;
@@ -238,11 +249,17 @@ function renderPreview(j) {
   $('#thumbs').querySelectorAll('.thumb').forEach((el) => {
     el.onclick = () => setPreviewPage(Number(el.dataset.p));
   });
-  $('#previewHint').textContent = j.truncated
-    ? `共 ${j.pages} 页，这里只预览前 ${j.rendered} 页`
-    : `共 ${j.pages} 页，预览与打印使用同一套几何参数`;
+  if (j.truncated) {
+    $('#previewHint').textContent = (rf === 1 && rl === previewTotal)
+      ? `共 ${j.pages} 页，这里只预览前 ${j.rendered} 页`
+      : `打印范围 ${rf}-${rl}（${span} 页），这里只预览前 ${j.rendered} 页`;
+  } else if (rf !== 1 || rl !== previewTotal) {
+    $('#previewHint').textContent = `打印范围 ${rf}-${rl}，预览与打印使用同一套几何参数`;
+  } else {
+    $('#previewHint').textContent = `共 ${j.pages} 页，预览与打印使用同一套几何参数`;
+  }
   $('#previewSizes').textContent = `${j.paper} · 可打印区 ${mmOf(cw)}×${mmOf(ch)} mm · 页边距 ${mmOf(mx)}/${mmOf(my)} mm · ${j.fit ? '缩放适应纸张' : '1:1 裁切'}`;
-  setPreviewPage(1);
+  setPreviewPage(rf);
 }
 
 async function buildPreview() {
@@ -252,6 +269,7 @@ async function buildPreview() {
   files.forEach((f) => fd.append('file', f, f.name));
   fd.append('paper', $('#paper').value);
   fd.append('fit', $('#fit').checked ? '1' : '0');
+  fd.append('pages', $('#pages').value.trim());
   previewBusy = true;
   $('#previewCard').style.display = '';
   $('#previewMeta').textContent = '生成中…';
@@ -383,6 +401,8 @@ async function load() {
 
 $('#paper').onchange = () => { if (files.length) buildPreview(); };
 $('#fit').onchange = () => { if (files.length) buildPreview(); };
+// 页码范围也参与预览渲染：改了就重建，预览里看到的范围就是实际打印的范围
+$('#pages').onchange = () => { if (files.length) buildPreview(); };
 $('#btnPrint').onclick = doPrint;
 $('#btnTest').onclick = testPage;
 $('#btnRefresh').onclick = () => { load(); flash('状态已刷新', 'ok'); };
