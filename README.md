@@ -52,6 +52,7 @@ captures/                     # Windows 驱动正常打印的 9100 抓包（KPSL
 experiments/                  # 调试期的对照流（C/D/E.kpsl、标定页 cal.pdf、t1~t7.kpsl）
 tools/                        # 解析 / 打补丁 / 发送 的一次性脚本
 capture_proxy.py              # 抓包代理：8080 → 打印机 9100，落盘原始字节
+tests/                        # 单元与接口测试（stdlib unittest，零依赖），见「测试与验证」
 ```
 
 **持久化数据不在仓库里**（2026-11 起的目录约定）：
@@ -82,6 +83,9 @@ capture_proxy.py              # 抓包代理：8080 → 打印机 9100，落盘�
   ```bash
   sudo firewall-cmd --add-port=8080/tcp --permanent && sudo firewall-cmd --reload
   ```
+
+> ⚠️ **本服务没有任何访问控制**（2026-11 决定不做鉴权）：任何能连到 8080 的人都能上传文件、
+> 发起打印、查看作业历史。防火墙放行时**只对可信局域网开放**，不要映射到公网。
 
 ### 方式一：一键脚本（Podman，推荐）
 
@@ -180,6 +184,12 @@ docker compose up -d --build      # 或 podman-compose up -d --build
 | `TZ` | `Asia/Shanghai` | 时区（任务列表的打印时间按它显示） |
 | `DATA_DIR` | `/data` | 容器内数据目录，必须与挂载点一致，**不要改** |
 
+`run.sh` 同样接受这些环境变量（宿主侧同名覆盖），换网络/换端口不用改脚本：
+
+```bash
+PRINTER_IP=1.2.3.4 PRINTER_PORT=9101 WEB_PORT=9090 DATA=/path/to/data ./run.sh
+```
+
 ### 日常运维
 
 | 操作 | Podman（run.sh） | 等价手动命令 |
@@ -221,7 +231,11 @@ cd ~/Documents/taskalfa-print && ./run.sh
 - 上传：拖拽或点击，多文件会**按顺序合并成一个作业**。
 - 参数：单面 / 双面长边 / 双面短边、份数、纸张（A4/A3/A5/Letter/Legal）、页码范围、是否「适应纸张大小」。
   分辨率固定 600dpi（打印机原生），不再暴露 300dpi 选项。
-- **打印预览**：选完文件（或改纸张/适应纸张）自动渲染。预览和正式打印共用同一套几何参数
+- **页码范围（所见即所得）**：格式 `1-4`、`3`、`2-`（起始必填，结束可省）。预览只渲染这个范围，
+  缩略图页码显示的是**文档真实页号**（如「第 5 页 · 打印范围 4-6 · 共 9 页」），改范围会立刻重渲预览；
+  打印时以预览时的范围为准。起始页超出文档页数直接返回 400（不静默打全部），
+  结束页超出自动夹到末页；留空 = 全部页。
+- **打印预览**：选完文件（或改纸张/适应纸张/页码范围）自动渲染。预览和正式打印共用同一套几何参数
   （可打印区尺寸 + `-dFIXEDMEDIA` + `-dPDFFitPage` 或 `PageOffset` 裁边），
   所以白边、裁切、缩放与真实出纸一致。右侧缩略图切页。
 - 打印：点「开始打印」时提交预览 token，服务端直接复用已转换好的 PDF，不再重传文件。
@@ -234,10 +248,25 @@ cd ~/Documents/taskalfa-print && ./run.sh
 | GET | `/` | Web 界面 |
 | GET | `/api/health` | `{"ok": true}` |
 | GET | `/api/state` | 打印机状态 + 最近作业列表 |
-| POST | `/api/preview` | multipart：`file`(可多个) / `paper` / `fit` → 预览 token + 每页 PNG 地址 |
-| GET | `/api/preview/<token>/p<N>.png` | 预览图（灰度 PNG，120dpi） |
-| POST | `/api/print` | multipart：`token` 或 `file` + `copies`/`duplex`/`paper`/`pages`/`fit` |
+| POST | `/api/preview` | multipart：`file`(可多个) / `paper` / `fit` / `pages`（如 `1-4`）→ 预览 token + 每页 PNG 地址；页码范围格式错 → 400 |
+| GET | `/api/preview/<token>/p<N>.png` | 预览图（灰度 PNG，120dpi，页号=文档真实页号） |
+| POST | `/api/print` | multipart：`token` 或 `file` + `copies`/`duplex`/`paper`/`pages`/`fit` → 400 字段不合法（份数、页码范围）；413 超限；503 并发满 |
 | POST | `/api/test` | 打印内置测试页 |
+
+## 测试与验证
+
+```bash
+# 宿主（只要 python3；gs / pdfinfo / libreoffice 相关用例自动 skip）
+python3 -m unittest discover
+
+# 容器内全量（镜像里工具齐全，58 个用例全部真跑）
+podman run --rm --entrypoint bash -v "$PWD/tests:/app/tests:Z" taskalfa-print:latest \
+  -c 'python3 -m unittest discover -s /app/tests -t /app -v'
+
+# 离线端到端：容器内单测 + xlsx/pptx/pdf 上传打印全链路，
+# 用假打印机收流并与 captures/ 金标准逐字节比对（不打真纸）
+python3 experiments/offline_e2e.py    # 需要 podman
+```
 
 ## 工具脚本（`tools/`）
 

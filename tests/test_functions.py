@@ -231,12 +231,16 @@ class FmtTsTests(unittest.TestCase):
 
 class ToPdfTests(unittest.TestCase):
     def test_unconvertible_format_raises_joberror(self):
-        # 宿主与容器都转不了该扩展名 → to_pdf 必须抛中文 JobError，
-        # 而不是旧的 RuntimeError("convert failed")
+        # 要让容器里的 LibreOffice 真正失败，输入必须打中「专用过滤器加载失败」：
+        # - 纯文本内容的 .docx（含 "garbage"、未知扩展名）→ LO 走纯文本兜底照样转出 PDF
+        #   （2026-11-23 实测 `printf garbage > a.docx` 产出 11852 字节 PDF）→ 断言必挂
+        # - 0 字节文件 → LO 当空文档转出 PDF → 同样不可用
+        # - PK 魔数的伪 .docx：docx(zip) 过滤器激活但解压失败 → "source file could not be loaded"，
+        #   无输出产物 → to_pdf 抛中文 JobError ✓；宿主没装 libreoffice → FileNotFoundError 同样 JobError
         with tempfile.TemporaryDirectory() as td:
-            src = os.path.join(td, "a.unknownext")
+            src = os.path.join(td, "a.docx")
             with open(src, "wb") as f:
-                f.write(b"garbage")
+                f.write(b"PK\x03\x04not-a-real-zip-at-all")
             with contextlib.redirect_stderr(io.StringIO()):   # 静音预期内的 traceback
                 with self.assertRaises(server.JobError) as cm:
                     server.to_pdf(src, td)
