@@ -1,5 +1,7 @@
 # -*- coding: utf-8 -*-
 """纯函数特征测试（不依赖 gs/pdfinfo/libreoffice，宿主可跑）。"""
+import contextlib
+import io
 import json
 import os
 import shutil
@@ -192,10 +194,17 @@ class MultipartTests(unittest.TestCase):
 
 
 class SanitizeMsgTests(unittest.TestCase):
-    """特征基线：当前实现会把「含 3+ 连续英文字母」的消息整条换掉。"""
+    """规则：整条不含中文、且含 3+ 连续英文字母 → 换成状态默认文案；其余保留。"""
 
     def test_chinese_kept(self):
         self.assertEqual(server.sanitize_msg("error", "发送失败：打印机未响应"), "发送失败：打印机未响应")
+
+    def test_mixed_chinese_english_kept(self):
+        # 旧规则（含 3+ 字母就整条换）会把中文错误误伤成「打印机未响应」
+        self.assertEqual(server.sanitize_msg("error", "文件已损坏或不是有效的 PDF"),
+                         "文件已损坏或不是有效的 PDF")
+        self.assertEqual(server.sanitize_msg("error", "文档转换失败：该文件格式暂不支持或文件已损坏"),
+                         "文档转换失败：该文件格式暂不支持或文件已损坏")
 
     def test_english_replaced_by_status_default(self):
         self.assertEqual(server.sanitize_msg("error", "convert failed: source file"),
@@ -207,6 +216,66 @@ class SanitizeMsgTests(unittest.TestCase):
         self.assertEqual(server.sanitize_msg("done", ""), "已发送到打印机")
         self.assertEqual(server.sanitize_msg("pending", ""), "处理中…")
         self.assertEqual(server.sanitize_msg("unknown", None), "处理中…")
+
+
+class FmtTsTests(unittest.TestCase):
+    def test_uses_local_time(self):
+        ts = 1700000000
+        self.assertEqual(server.fmt_ts(ts),
+                         time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(ts)))
+
+    def test_empty(self):
+        self.assertEqual(server.fmt_ts(0), "")
+        self.assertEqual(server.fmt_ts(None), "")
+
+
+class ToPdfTests(unittest.TestCase):
+    def test_unconvertible_format_raises_joberror(self):
+        # 宿主与容器都转不了该扩展名 → to_pdf 必须抛中文 JobError，
+        # 而不是旧的 RuntimeError("convert failed")
+        with tempfile.TemporaryDirectory() as td:
+            src = os.path.join(td, "a.unknownext")
+            with open(src, "wb") as f:
+                f.write(b"garbage")
+            with contextlib.redirect_stderr(io.StringIO()):   # 静音预期内的 traceback
+                with self.assertRaises(server.JobError) as cm:
+                    server.to_pdf(src, td)
+            self.assertIn("转换失败", str(cm.exception))
+
+    def test_pdf_passthrough_no_conversion(self):
+        with tempfile.TemporaryDirectory() as td:
+            src = os.path.join(td, "a.pdf")
+            with open(src, "wb") as f:
+                f.write(b"%PDF-1.4")
+            self.assertEqual(server.to_pdf(src, td), src)
+
+
+class LogMessageTests(unittest.TestCase):
+    def _handler(self, path):
+        h = server.Handler.__new__(server.Handler)
+        h.path = path
+        h.client_address = ("127.0.0.1", 12345)   # super().log_message 要打来源地址
+        return h
+
+    def test_polling_ok_suppressed(self):
+        buf = io.StringIO()
+        with contextlib.redirect_stderr(buf):
+            self._handler("/api/state").log_message(
+                '"%s" %s %s', "GET /api/state HTTP/1.1", 200, 512)
+            self._handler("/api/health").log_message(
+                '"%s" %s %s', "GET /api/health HTTP/1.1", 200, 15)
+        self.assertEqual(buf.getvalue(), "")
+
+    def test_polling_error_and_normal_requests_logged(self):
+        buf = io.StringIO()
+        with contextlib.redirect_stderr(buf):
+            self._handler("/api/state").log_message(
+                '"%s" %s %s', "GET /api/state HTTP/1.1", 500, 0)
+            self._handler("/api/print").log_message(
+                '"%s" %s %s', "POST /api/print HTTP/1.1", 200, 100)
+        out = buf.getvalue()
+        self.assertIn("500", out)
+        self.assertIn("/api/print", out)
 
 
 class PagesTests(unittest.TestCase):

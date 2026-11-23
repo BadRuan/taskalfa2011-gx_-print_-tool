@@ -99,8 +99,10 @@ class JobError(Exception):
 def fmt_ts(ts):
     if not ts:
         return ""
-    # 固定按东八区显示，避免容器时区为 UTC 导致时间差 8 小时
-    return time.strftime("%Y-%m-%d %H:%M:%S", time.gmtime(float(ts) + 8 * 3600))
+    # 按本机时区显示（容器在 Dockerfile/run.sh 里设 TZ=Asia/Shanghai）。
+    # 旧实现 gmtime(ts+8h) 写死东八区：TZ 改成别的时区时显示就不对，
+    # 且与 README 里「TZ 决定时区」的描述矛盾。
+    return time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(float(ts)))
 
 
 # ---------------------------------------------------------------- SNMP
@@ -390,13 +392,15 @@ def to_pdf(src, outdir):
               "-env:UserInstallation=" + prof,
               "--convert-to", "pdf", "--outdir", outdir, src], timeout=600)
     except Exception:
-        pass
+        traceback.print_exc()   # 真实原因（libreoffice 的 stderr）进容器日志
+        # 容错：libreoffice 偶发非零退出但仍可能已产出 PDF，先看产物再定
     if os.path.exists(out):
         return out
     for name in os.listdir(outdir):
         if name.lower().endswith(".pdf"):
             return os.path.join(outdir, name)
-    raise RuntimeError("convert failed")
+    # 旧实现这里吞掉 libreoffice 的错误只抛 "convert failed"，日志里看不到根因
+    raise JobError("文档转换失败：该文件格式暂不支持或文件已损坏")
 
 
 def page_box(paper):
@@ -824,6 +828,8 @@ def _worker():
         try:
             try:
                 pdf = job_pdf(job, workdir)
+            except JobError:
+                raise                       # 中文说明直接给用户（如格式不支持）
             except Exception:
                 traceback.print_exc()
                 raise JobError("文件转换失败，请确认文件格式是否受支持")
@@ -950,11 +956,16 @@ DUPLEX_TEXT = {"off": "单面", "long": "双面·长边", "short": "双面·短�
 
 
 def sanitize_msg(status, message):
-    """保证页面上的“说明”只出现简体中文。"""
+    """保证页面上的“说明”只出现简体中文。
+
+    只替换「整条不含中文」的英文消息（OS/过滤器噪声）；旧规则是「含 3+
+    连续英文字母就整条换掉」，会把我们自己的中文错误（如「…不是有效的 PDF」）
+    也误伤成毫不相关的「打印机未响应」。
+    """
     text = str(message or "").strip()
     if not text:
         return {"done": "已发送到打印机"}.get(status, "处理中…")
-    if re.search(r"[A-Za-z]{3,}", text):
+    if not re.search(r"[一-鿿]", text) and re.search(r"[A-Za-z]{3,}", text):
         return {
             "done": "已发送到打印机",
             "error": "发送失败：打印机未响应或未就绪",
@@ -982,7 +993,21 @@ class Handler(BaseHTTPRequestHandler):
     server_version = "taskalfa-print/3.0"
 
     def log_message(self, fmt, *args):
-        pass
+        """访问日志：写到 stderr（podman logs 能看到），但跳过轮询噪音。
+
+        UI 每 2s 打一次 /api/state、/api/health，全记会把日志淹掉；
+        4xx/5xx 与其它请求照常记，排障时能看见。
+        """
+        path = urlparse(self.path).path
+        code = None
+        if len(args) >= 2:
+            try:
+                code = int(args[1])
+            except (TypeError, ValueError):
+                pass
+        if path in ("/api/state", "/api/health") and code is not None and code < 400:
+            return
+        super().log_message(fmt, *args)
 
     def _send(self, code, body, ctype="application/json; charset=utf-8"):
         if isinstance(body, str):
