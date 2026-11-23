@@ -15,15 +15,19 @@
 FROM quay.io/fedora/fedora:latest
 
 # PYTHONUNBUFFERED：python 日志实时可见；DATA_DIR 必须与 run.sh 的挂载点一致
+# TZ：fmt_ts 用 localtime 显示作业时间，容器不设会回退 UTC（差 8 小时）
 ENV LANG=C.UTF-8 \
     PYTHONUNBUFFERED=1 \
-    DATA_DIR=/data
+    DATA_DIR=/data \
+    TZ=Asia/Shanghai
 
 # 打印链路依赖：
 #   python3 + Pillow      服务与图像/PDF 处理
 #   ghostscript           cups 设备生成 CUPS raster（必须 8bpc 灰度，见技术档案 6 节）
-#   poppler-utils/psutils PDF 工具
-#   libreoffice-writer    Office 文档转 PDF
+#   poppler-utils/psutils PDF 工具（pdfinfo 取页数）
+#   libreoffice-writer    docx → PDF
+#   libreoffice-calc      xlsx → PDF（缺了会报 source file could not be loaded，实测）
+#   libreoffice-impress   pptx → PDF（同上）
 #   cups-libs             滤镜运行时依赖
 #   fontconfig + Noto CJK 中文字体（否则中文变方框）
 RUN dnf -y install --setopt=install_weak_deps=False \
@@ -33,6 +37,8 @@ RUN dnf -y install --setopt=install_weak_deps=False \
         poppler-utils \
         psutils \
         libreoffice-writer \
+        libreoffice-calc \
+        libreoffice-impress \
         cups-libs \
         fontconfig \
         google-noto-sans-cjk-fonts \

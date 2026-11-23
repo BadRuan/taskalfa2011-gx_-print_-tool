@@ -13,8 +13,12 @@ cd "$(dirname "$0")"
 
 IMAGE=taskalfa-print:latest
 NAME=taskalfa-print
-DATA=/home/ruanfumin/Documents/Docker/tasklafa_print/data
-PORT=8080
+# 可用环境变量覆盖（换网络/换端口不用改脚本）：
+#   PRINTER_IP=1.2.3.4 PRINTER_PORT=9100 WEB_PORT=8080 DATA=/path/data ./run.sh
+DATA="${DATA:-/home/ruanfumin/Documents/Docker/tasklafa_print/data}"
+PRINTER_IP="${PRINTER_IP:-192.168.0.199}"
+PRINTER_PORT="${PRINTER_PORT:-9100}"
+PORT="${WEB_PORT:-8080}"
 
 case "${1:-start}" in
   logs)
@@ -36,9 +40,9 @@ podman rm -f "$NAME" >/dev/null 2>&1 || true
 podman run -d --name "$NAME" \
   --restart=unless-stopped \
   --network=host \
-  -e PRINTER_IP=192.168.0.199 \
-  -e PRINTER_PORT=9100 \
-  -e TZ=Asia/Shanghai \
+  -e PRINTER_IP="$PRINTER_IP" \
+  -e PRINTER_PORT="$PRINTER_PORT" \
+  -e TZ="${TZ:-Asia/Shanghai}" \
   -e WEB_PORT="$PORT" \
   -v "$DATA:/data:Z" \
   "$IMAGE"

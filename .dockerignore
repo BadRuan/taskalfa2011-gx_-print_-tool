@@ -6,5 +6,9 @@ capture_proxy.py
 rastertokpsl_amd64
 experiments/
 data/
+captures/
+tools/
+tests/
+*.zip
 *.log
 __pycache__/
